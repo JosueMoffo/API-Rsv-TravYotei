@@ -7,6 +7,8 @@ import lombok.RequiredArgsConstructor;
 import lombok.extern.slf4j.Slf4j;
 import org.springframework.stereotype.Service;
 import org.springframework.transaction.annotation.Transactional;
+import org.springframework.transaction.support.TransactionSynchronization;
+import org.springframework.transaction.support.TransactionSynchronizationManager;
 
 import java.time.LocalDateTime;
 import java.util.List;
@@ -59,13 +61,14 @@ public class ReservationService {
         double totalAmount = trajet.getPricePerSeat() * seatsRequired;
         reservation.setTotalAmount(totalAmount);
 
-        // Expiration en 2 minutes pour les tests
-        reservation.setTtlExpiry(LocalDateTime.now().plusMinutes(2));
+        // Expiration en 5 minutes pour laisser le temps au simulateur
+        reservation.setTtlExpiry(LocalDateTime.now().plusMinutes(5));
 
+        // 4. Sauvegarder la réservation
         Reservation savedReservation = reservationRepository.save(reservation);
         log.info("📝 Réservation créée en base: {}", savedReservation.getId());
 
-        // 4. Créer les items
+        // 5. Créer les items
         for (CreateReservationRequest.PassengerInfo passenger : request.getPassengers()) {
             ReservationItem item = new ReservationItem();
             item.setId(UUID.randomUUID().toString());
@@ -75,11 +78,41 @@ public class ReservationService {
             reservationItemRepository.save(item);
         }
 
-        // 5. Émettre l'événement Kafka (sérialisation manuelle en String)
-        kafkaProducerService.sendReservationCreatedEvent(savedReservation);
+        // 6. Envoyer l'événement Kafka APRÈS le commit de la transaction
+        sendEventAfterTransactionCommit(savedReservation);
 
         log.info("✅ Réservation {} créée avec succès!", savedReservation.getId());
         return savedReservation;
+    }
+
+    /**
+     * Envoie l'événement Kafka APRÈS le commit de la transaction
+     * pour garantir que la réservation est visible par les consumers
+     */
+    private void sendEventAfterTransactionCommit(Reservation reservation) {
+        // Vérifier qu'on est bien dans une transaction
+        if (TransactionSynchronizationManager.isActualTransactionActive()) {
+            TransactionSynchronizationManager.registerSynchronization(
+                    new TransactionSynchronization() {
+                        @Override
+                        public void afterCommit() {
+                            log.info("🔄 Transaction commitée, envoi événement Kafka pour {}", reservation.getId());
+                            kafkaProducerService.sendReservationCreatedEvent(reservation);
+                        }
+
+                        @Override
+                        public void afterCompletion(int status) {
+                            if (status == STATUS_ROLLED_BACK) {
+                                log.warn("⚠️ Transaction rollbackée, événement Kafka non envoyé pour {}", reservation.getId());
+                            }
+                        }
+                    }
+            );
+        } else {
+            // Pas de transaction active, envoyer immédiatement
+            log.warn("⚠️ Pas de transaction active, envoi immédiat Kafka");
+            kafkaProducerService.sendReservationCreatedEvent(reservation);
+        }
     }
 
     @Transactional

@@ -12,6 +12,8 @@ import lombok.extern.slf4j.Slf4j;
 import org.springframework.boot.autoconfigure.condition.ConditionalOnProperty;
 import org.springframework.kafka.annotation.KafkaListener;
 import org.springframework.kafka.core.KafkaTemplate;
+import org.springframework.kafka.support.KafkaHeaders;
+import org.springframework.messaging.handler.annotation.Header;
 import org.springframework.scheduling.annotation.Async;
 import org.springframework.stereotype.Service;
 
@@ -37,10 +39,8 @@ public class PaymentSimulator {
     @PostConstruct
     public void init() {
         log.info("💰 PAYMENT SIMULATOR INITIALISÉ");
-        log.info("   → Topics écoutés: reservation-created");
-        log.info("   → Topics émis: payment-confirmed");
-        log.info("   → Délai: 30 secondes");
-        log.info("   → Group ID: payment-simulator-group");
+        log.info("   → Ne traite QUE les messages FUTURS (offset: latest)");
+        log.info("   → Ignore les anciennes réservations");
     }
 
     @KafkaListener(
@@ -49,18 +49,50 @@ public class PaymentSimulator {
             containerFactory = "stringKafkaListenerContainerFactory"
     )
     @Async
-    public void simulatePayment(String reservationJson) {
+    public void simulatePayment(String reservationJson, @Header(KafkaHeaders.RECEIVED_TIMESTAMP) Long timestamp) {
         try {
+            long messageAge = System.currentTimeMillis() - timestamp;
+
+            // IGNORER les messages de plus de 5 minutes
+            if (messageAge > 5 * 60 * 1000) { // 5 minutes
+                log.debug("⏭️ [SIMULATEUR] Message ignoré (trop ancien: {} ms)", messageAge);
+                return;
+            }
+
             log.info("📨 [SIMULATEUR] Message reçu sur 'reservation-created'");
 
             Reservation reservation = objectMapper.readValue(reservationJson, Reservation.class);
             String reservationId = reservation.getId();
 
+            // VÉRIFIER immédiatement si la réservation est toujours valide
+            var reservationOpt = reservationRepository.findById(reservationId);
+            if (reservationOpt.isEmpty()) {
+                log.warn("⚠️ [SIMULATEUR] Réservation {} introuvable en base", reservationId);
+                return;
+            }
+
+            var reservationInDb = reservationOpt.get();
+
+            // Vérifier le statut ACTUEL en base
+            if (reservationInDb.getStatus() != ReservationStatus.PENDING) {
+                log.warn("⚠️ [SIMULATEUR] Réservation {} déjà traitée (statut: {})",
+                        reservationId, reservationInDb.getStatus());
+                return;
+            }
+
+            // Vérifier qu'elle n'est pas expirée
+            if (reservationInDb.getTtlExpiry() != null &&
+                    reservationInDb.getTtlExpiry().isBefore(java.time.LocalDateTime.now())) {
+                log.warn("⚠️ [SIMULATEUR] Réservation {} expirée à {}",
+                        reservationId, reservationInDb.getTtlExpiry());
+                return;
+            }
+
             log.info("💰 [SIMULATEUR] Traitement réservation {}", reservationId);
             log.info("   → Client: {}", reservation.getClientId());
             log.info("   → Montant: {}€", reservation.getTotalAmount());
-            log.info("   → Statut actuel: {}", reservation.getStatus());
-            log.info("   → Expire à: {}", reservation.getTtlExpiry());
+            log.info("   → Expire à: {}", reservationInDb.getTtlExpiry());
+            log.info("   → Âge message: {} ms", messageAge);
 
             log.info("⏳ [SIMULATEUR] Simulation paiement en cours (30s)...");
 
@@ -83,7 +115,7 @@ public class PaymentSimulator {
 
     private void processPaymentConfirmation(String reservationId) {
         try {
-            log.info("🔍 [SIMULATEUR] Vérification réservation {}", reservationId);
+            log.info("🔍 [SIMULATEUR] Vérification finale réservation {}", reservationId);
 
             var reservationOpt = reservationRepository.findById(reservationId);
             if (reservationOpt.isEmpty()) {
@@ -92,24 +124,25 @@ public class PaymentSimulator {
             }
 
             var reservation = reservationOpt.get();
-            ReservationStatus currentStatus = reservation.getStatus();
 
-            if (currentStatus != ReservationStatus.PENDING) {
+            // DOUBLE VÉRIFICATION du statut
+            if (reservation.getStatus() != ReservationStatus.PENDING) {
                 log.warn("⚠️ [SIMULATEUR] Réservation {} déjà traitée (statut: {})",
-                        reservationId, currentStatus);
+                        reservationId, reservation.getStatus());
                 return;
             }
 
             // Vérifier qu'elle n'est pas expirée
             if (reservation.getTtlExpiry() != null &&
                     reservation.getTtlExpiry().isBefore(java.time.LocalDateTime.now())) {
-                log.warn("⚠️ [SIMULATEUR] Réservation {} expirée", reservationId);
+                log.warn("⚠️ [SIMULATEUR] Réservation {} expirée à {}",
+                        reservationId, reservation.getTtlExpiry());
                 return;
             }
 
             log.info("✅ [SIMULATEUR] Réservation {} valide, création événement paiement...", reservationId);
 
-            // Créer l'événement de confirmation en utilisant le DTO
+            // Créer l'événement de confirmation
             PaymentConfirmationEvent event = PaymentConfirmationEvent.builder()
                     .reservationId(reservationId)
                     .status("CONFIRMED")
@@ -127,6 +160,9 @@ public class PaymentSimulator {
                     .whenComplete((result, ex) -> {
                         if (ex == null) {
                             log.info("✅ [SIMULATEUR] Paiement simulé ENVOYÉ pour {}", reservationId);
+                            log.info("   → Topic: {}", result.getRecordMetadata().topic());
+                            log.info("   → Partition: {}", result.getRecordMetadata().partition());
+                            log.info("   → Offset: {}", result.getRecordMetadata().offset());
                         } else {
                             log.error("❌ [SIMULATEUR] Erreur envoi Kafka: {}", ex.getMessage());
                         }
