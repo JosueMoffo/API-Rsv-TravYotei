@@ -1,40 +1,57 @@
 package com.example.Rsv_TravYotei.model;
 
+import jakarta.persistence.*;
+import lombok.Data;
+import java.time.LocalDateTime;
+
+@Entity
+@Table(name = "reservations")
+@Data
 public class Reservation {
-    private Long id;
-    private String clientNom;
-    private String destination;
-    private String dateDepart;
-    private String dateRetour;
-    private int nombrePersonnes;
 
-    public Reservation() {}
+    @Id
+    @Column(name = "id", columnDefinition = "CHAR(36)")
+    private String id;
 
-    public Reservation(Long id, String clientNom, String destination, String dateDepart, String dateRetour, int nombrePersonnes) {
-        this.id = id;
-        this.clientNom = clientNom;
-        this.destination = destination;
-        this.dateDepart = dateDepart;
-        this.dateRetour = dateRetour;
-        this.nombrePersonnes = nombrePersonnes;
+    @Column(name = "client_id", nullable = false, length = 128)
+    private String clientId;
+
+    @Column(name = "transport_id", nullable = false, columnDefinition = "CHAR(36)")
+    private String transportId;
+
+    @Enumerated(EnumType.STRING)
+    @Column(name = "status", nullable = false, length = 20)
+    private ReservationStatus status;
+
+    @Column(name = "total_amount", nullable = false)
+    private Double totalAmount;
+
+    @Column(name = "operation_token", unique = true, length = 128)
+    private String operationToken;
+
+    @Column(name = "ttl_expiry")
+    private LocalDateTime ttlExpiry;
+
+    @Column(name = "created_at")
+    private LocalDateTime createdAt;
+
+    @Column(name = "updated_at")
+    private LocalDateTime updatedAt;
+
+    @PrePersist
+    protected void onCreate() {
+        if (id == null) {
+            id = java.util.UUID.randomUUID().toString();
+        }
+        createdAt = LocalDateTime.now();
+        updatedAt = LocalDateTime.now();
+        if (operationToken == null) {
+            operationToken = java.util.UUID.randomUUID().toString();
+        }
     }
 
-    // Getters et Setters
-    public Long getId() { return id; }
-    public void setId(Long id) { this.id = id; }
-
-    public String getClientNom() { return clientNom; }
-    public void setClientNom(String clientNom) { this.clientNom = clientNom; }
-
-    public String getDestination() { return destination; }
-    public void setDestination(String destination) { this.destination = destination; }
-
-    public String getDateDepart() { return dateDepart; }
-    public void setDateDepart(String dateDepart) { this.dateDepart = dateDepart; }
-
-    public String getDateRetour() { return dateRetour; }
-    public void setDateRetour(String dateRetour) { this.dateRetour = dateRetour; }
-
-    public int getNombrePersonnes() { return nombrePersonnes; }
-    public void setNombrePersonnes(int nombrePersonnes) { this.nombrePersonnes = nombrePersonnes; }
+    @PreUpdate
+    protected void onUpdate() {
+        updatedAt = LocalDateTime.now();
+    }
 }
